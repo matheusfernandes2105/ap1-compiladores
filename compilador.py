@@ -1,11 +1,19 @@
 """
-Compilador PascalLite - Fase 1: Análise Léxica e Sintática
+Compilador PascalLite - Fase 2: Análise Semântica e Geração de Código Intermediário (MEPA)
 
-Implementa as fases de análise léxica e sintática para a linguagem PascalLite,
-uma versão simplificada do Pascal com tipos integer e boolean, comandos if e while.
+Implementa as fases de análise léxica, sintática, semântica e geração de código
+intermediário para a linguagem PascalLite, uma versão simplificada do Pascal
+com tipo integer, comandos if e while.
 
-Integrantes do grupo:
-    - (preencher com os nomes dos integrantes)
+A análise semântica verifica:
+  - Declaração duplicada de identificadores (erro semântico)
+  - Uso de identificadores não declarados (erro semântico)
+
+A geração de código intermediário produz instruções da MEPA (Máquina de Execução
+para PascalLite com Armazenamento), conforme descrito no livro de Tomasz Kowaltowski.
+
+Integrante:
+    - Matheus Fernandes Martins Batista - RA: 2202435
 
 Uso: python compilador.py <arquivo_fonte>
 """
@@ -341,17 +349,115 @@ class AnalisadorLexico:
 
 
 # ============================================================
-# Analisador Sintático (Parser Descendente Recursivo)
+# Tabela de Símbolos (mini-tabela para variáveis)
+# ============================================================
+
+class TabelaSimbolos:
+    """
+    Tabela de símbolos simplificada para o compilador PascalLite.
+
+    Armazena os identificadores declarados na seção 'var' com seus
+    respectivos endereços (ordem de declaração) e tipos. Utilizada
+    durante a análise semântica para:
+      - Verificar declarações duplicadas
+      - Verificar se variáveis usadas foram declaradas
+      - Obter o endereço de memória de uma variável para geração de código
+    """
+
+    def __init__(self):
+        """Inicializa a tabela de símbolos vazia."""
+        self.simbolos = {}      # dicionário: identificador -> {endereco, tipo}
+        self.proximo_endereco = 0  # próximo endereço disponível
+
+    def inserir(self, identificador, tipo, linha):
+        """
+        Insere um identificador na tabela de símbolos.
+
+        Verifica se o identificador já foi declarado; se sim, gera
+        erro semântico e encerra o compilador.
+
+        Args:
+            identificador: nome da variável (lexema)
+            tipo: tipo da variável (ex: 'integer')
+            linha: linha da declaração (para mensagem de erro)
+        """
+        if identificador in self.simbolos:
+            print(f"Erro semântico: identificador '{identificador}' já declarado "
+                  f"(linha {linha})")
+            sys.exit(1)
+        self.simbolos[identificador] = {
+            'endereco': self.proximo_endereco,
+            'tipo': tipo
+        }
+        self.proximo_endereco += 1
+
+    def buscar(self, identificador, linha):
+        """
+        Busca um identificador na tabela de símbolos e retorna seu endereço.
+
+        Se o identificador não for encontrado, gera erro semântico e encerra.
+
+        Args:
+            identificador: nome da variável a buscar
+            linha: linha onde a variável é referenciada (para mensagem de erro)
+
+        Returns:
+            Endereço (int) da variável na memória.
+        """
+        if identificador not in self.simbolos:
+            print(f"Erro semântico: identificador '{identificador}' não declarado "
+                  f"(linha {linha})")
+            sys.exit(1)
+        return self.simbolos[identificador]['endereco']
+
+    def total_variaveis(self):
+        """Retorna o número total de variáveis declaradas."""
+        return self.proximo_endereco
+
+
+# ============================================================
+# Gerador de Rótulos (para instruções de desvio da MEPA)
+# ============================================================
+
+class GeradorRotulos:
+    """
+    Gera rótulos consecutivos (L1, L2, L3, ...) para as instruções
+    de desvio condicional e incondicional da MEPA.
+    """
+
+    def __init__(self):
+        """Inicializa o contador de rótulos."""
+        self.contador = 0
+
+    def proximo_rotulo(self):
+        """
+        Retorna o próximo rótulo consecutivo.
+
+        Returns:
+            String no formato 'L1', 'L2', etc.
+        """
+        self.contador += 1
+        return f"L{self.contador}"
+
+
+# ============================================================
+# Analisador Sintático com Análise Semântica e Geração de Código
 # ============================================================
 
 class AnalisadorSintatico:
     """
-    Realiza a análise sintática do código PascalLite usando
-    o método de análise descendente recursiva (recursive descent).
+    Realiza a análise sintática, semântica e geração de código MEPA
+    para o compilador PascalLite, usando o método de análise
+    descendente recursiva (recursive descent).
 
     Cada não-terminal da gramática EBNF corresponde a um método.
     A interação com o analisador léxico se dá pela função consome(),
     que chama obter_atomo() do léxico.
+
+    Fase 2:
+    - Mantém uma tabela de símbolos para verificação semântica
+    - Gera instruções intermediárias da MEPA embutidas nas
+      funções de análise sintática (ações semânticas)
     """
 
     def __init__(self, lexico):
@@ -362,7 +468,10 @@ class AnalisadorSintatico:
             lexico: instância de AnalisadorLexico já inicializada.
         """
         self.lexico = lexico
-        self.ultima_linha = 1  # linha do último átomo consumido
+        self.ultima_linha = 1           # linha do último átomo consumido
+        self.tabela = TabelaSimbolos()  # tabela de símbolos para análise semântica
+        self.rotulos = GeradorRotulos() # gerador de rótulos para desvios MEPA
+        self.codigo_mepa = []           # lista de instruções MEPA geradas
         # Obtém o primeiro átomo (lookahead), pulando comentários
         self.lookahead = self._proximo_atomo()
 
@@ -381,29 +490,26 @@ class AnalisadorSintatico:
             atomo = self.lexico.obter_atomo()
         return atomo
 
-    def _imprimir_atomo(self, atomo):
+    def _emitir(self, instrucao):
         """
-        Imprime as informações do átomo consumido no formato especificado.
+        Emite uma instrução MEPA, adicionando-a à lista de código gerado.
 
-        Para átomos NUM, inclui também o valor numérico.
+        Args:
+            instrucao: string com a instrução MEPA (ex: 'INPP', 'CRCT 1')
         """
-        msg = f"Linha: {atomo.linha} - atomo: {atomo.tipo} lexema: {atomo.lexema}"
-        if atomo.tipo == NUM:
-            msg += f" valor: {atomo.valor}"
-        print(msg)
+        self.codigo_mepa.append(instrucao)
 
     def consome(self, esperado):
         """
         Consome o átomo atual se ele corresponde ao tipo esperado.
 
-        Se o lookahead tem o tipo esperado, imprime o átomo e avança
-        para o próximo. Caso contrário, reporta erro sintático e encerra.
+        Se o lookahead tem o tipo esperado, avança para o próximo.
+        Caso contrário, reporta erro sintático e encerra.
 
         Args:
             esperado: tipo de átomo esperado (ex: PROGRAM, IDENTIF)
         """
         if self.lookahead.tipo == esperado:
-            self._imprimir_atomo(self.lookahead)
             self.ultima_linha = self.lookahead.linha
             self.lookahead = self._proximo_atomo()
         else:
@@ -422,32 +528,55 @@ class AnalisadorSintatico:
         sys.exit(1)
 
     # --------------------------------------------------------
-    # Regras gramaticais (cada método = um não-terminal)
+    # Regras gramaticais com ações semânticas para geração MEPA
     # --------------------------------------------------------
 
     def programa(self):
         """
-        <programa> ::= program identificador [( <lista_identificadores> )] ; <bloco> .
+        <programa> ::= program identificador ; <bloco> .
+
+        Ações semânticas:
+          - Emite INPP (inicializa programa) no início
+          - Emite PARA (parada) no final
         """
         self.consome(PROGRAM)
         self.consome(IDENTIF)
-        # Parte opcional: ( <lista_identificadores> )
+        # Parte opcional: ( <lista_identificadores> ) — ignorada na fase 2
         if self.lookahead.tipo == ABRE_PAR:
             self.consome(ABRE_PAR)
-            self.lista_identificadores()
+            self._lista_identificadores_programa()
             self.consome(FECHA_PAR)
         self.consome(PONTO_VIRG)
+        # Emite instrução de início de programa MEPA
+        self._emitir("INPP")
         self.bloco()
+        # Emite instrução de parada MEPA
+        self._emitir("PARA")
         self.consome(PONTO)
-        # Análise concluída com sucesso
-        print(f"{self.ultima_linha} linhas analisadas, programa sintaticamente correto.")
+
+    def _lista_identificadores_programa(self):
+        """
+        Lista de identificadores do cabeçalho do programa (apenas sintática,
+        sem inserção na tabela de símbolos, pois são parâmetros do programa).
+        """
+        self.consome(IDENTIF)
+        while self.lookahead.tipo == VIRGULA:
+            self.consome(VIRGULA)
+            self.consome(IDENTIF)
 
     def bloco(self):
         """
         <bloco> ::= [<declarações de variáveis>] <comando composto>
+
+        Ações semânticas:
+          - Após declarações, emite AMEM n (aloca memória para n variáveis)
         """
         if self.lookahead.tipo == VAR:
             self.declaracoes_variaveis()
+        # Emite alocação de memória para as variáveis declaradas
+        num_vars = self.tabela.total_variaveis()
+        if num_vars > 0:
+            self._emitir(f"AMEM {num_vars}")
         self.comando_composto()
 
     def declaracoes_variaveis(self):
@@ -468,19 +597,27 @@ class AnalisadorSintatico:
     def declaracao(self):
         """
         <declaração> ::= <lista de identificadores> : <tipo>
-        """
-        self.lista_identificadores()
-        self.consome(DOIS_PONTOS)
-        self.tipo()
 
-    def lista_identificadores(self):
+        Ações semânticas:
+          - Coleta os identificadores da lista
+          - Após reconhecer o tipo, insere cada identificador na tabela
+            de símbolos com o tipo correspondente
         """
-        <lista de identificadores> ::= identificador { , identificador }
-        """
+        # Coleta os identificadores antes de consumir (para associar ao tipo)
+        ids_declarados = []
+        ids_declarados.append((self.lookahead.lexema, self.lookahead.linha))
         self.consome(IDENTIF)
         while self.lookahead.tipo == VIRGULA:
             self.consome(VIRGULA)
+            ids_declarados.append((self.lookahead.lexema, self.lookahead.linha))
             self.consome(IDENTIF)
+        self.consome(DOIS_PONTOS)
+        # Reconhece o tipo
+        tipo_var = self.lookahead.lexema.lower()
+        self.tipo()
+        # Insere cada identificador na tabela de símbolos
+        for nome, linha in ids_declarados:
+            self.tabela.inserir(nome, tipo_var, linha)
 
     def tipo(self):
         """
@@ -496,11 +633,17 @@ class AnalisadorSintatico:
     def comando_composto(self):
         """
         <comando composto> ::= begin <comando> { ; <comando> } end
+
+        Nota: permite comando vazio antes de 'end' (';' antes de 'end'
+        é válido em Pascal e representa um comando vazio).
         """
         self.consome(BEGIN)
         self.comando()
         while self.lookahead.tipo == PONTO_VIRG:
             self.consome(PONTO_VIRG)
+            # Se o próximo token é END, temos um comando vazio (válido em Pascal)
+            if self.lookahead.tipo == END:
+                break
             self.comando()
         self.consome(END)
 
@@ -529,108 +672,220 @@ class AnalisadorSintatico:
     def atribuicao(self):
         """
         <atribuição> ::= identificador := <expressão>
+
+        Ações semânticas:
+          - Verifica se o identificador está na tabela de símbolos
+          - Após avaliar a expressão, emite ARMZ endereco
         """
+        # Guarda o lexema e linha antes de consumir
+        nome = self.lookahead.lexema
+        linha = self.lookahead.linha
+        # Verifica se a variável foi declarada e obtém endereço
+        endereco = self.tabela.buscar(nome, linha)
         self.consome(IDENTIF)
         self.consome(ATRIB)
         self.expressao()
+        # Emite instrução de armazenamento na posição da variável
+        self._emitir(f"ARMZ {endereco}")
 
     def comando_entrada(self):
         """
         <comando de entrada> ::= read ( <lista de identificadores> )
+
+        Ações semânticas:
+          - Para cada identificador lido, emite LEIT seguido de ARMZ endereco
         """
         self.consome(READ)
         self.consome(ABRE_PAR)
-        self.lista_identificadores()
+        # Primeiro identificador
+        nome = self.lookahead.lexema
+        linha = self.lookahead.linha
+        endereco = self.tabela.buscar(nome, linha)
+        self.consome(IDENTIF)
+        self._emitir("LEIT")
+        self._emitir(f"ARMZ {endereco}")
+        # Identificadores adicionais separados por vírgula
+        while self.lookahead.tipo == VIRGULA:
+            self.consome(VIRGULA)
+            nome = self.lookahead.lexema
+            linha = self.lookahead.linha
+            endereco = self.tabela.buscar(nome, linha)
+            self.consome(IDENTIF)
+            self._emitir("LEIT")
+            self._emitir(f"ARMZ {endereco}")
         self.consome(FECHA_PAR)
 
     def comando_saida(self):
         """
         <comando de saída> ::= write ( <expressão> { , <expressão> } )
+
+        Ações semânticas:
+          - Após cada expressão, emite IMPR
         """
         self.consome(WRITE)
         self.consome(ABRE_PAR)
         self.expressao()
+        self._emitir("IMPR")
         while self.lookahead.tipo == VIRGULA:
             self.consome(VIRGULA)
             self.expressao()
+            self._emitir("IMPR")
         self.consome(FECHA_PAR)
 
     def comando_if(self):
         """
         <comando if> ::= if <expressão> then <comando> [else <comando>]
+
+        Ações semânticas:
+          - Após a expressão, emite DSVF L1 (desvia se falso)
+          - Se há else: antes do else emite DSVS L2, coloca L1: NADA,
+            executa o else, depois coloca L2: NADA
+          - Se não há else: após o then-comando coloca L1: NADA
         """
         self.consome(IF)
         self.expressao()
+        rotulo_falso = self.rotulos.proximo_rotulo()  # L1: pula se falso
+        self._emitir(f"DSVF {rotulo_falso}")
         self.consome(THEN)
         self.comando()
         # Parte opcional: else <comando>
         if self.lookahead.tipo == ELSE:
+            rotulo_fim = self.rotulos.proximo_rotulo()  # L2: pula o else
+            self._emitir(f"DSVS {rotulo_fim}")
+            self._emitir(f"{rotulo_falso}: NADA")
             self.consome(ELSE)
             self.comando()
+            self._emitir(f"{rotulo_fim}: NADA")
+        else:
+            self._emitir(f"{rotulo_falso}: NADA")
 
     def comando_while(self):
         """
         <comando while> ::= while <expressão> do <comando>
+
+        Ações semânticas:
+          - Emite L1: NADA antes da expressão
+          - Após a expressão, emite DSVF L2
+          - Após o comando, emite DSVS L1 (volta ao início do loop)
+          - Emite L2: NADA (saída do loop)
         """
+        rotulo_inicio = self.rotulos.proximo_rotulo()  # L1: início do loop
+        rotulo_fim = self.rotulos.proximo_rotulo()     # L2: saída do loop
         self.consome(WHILE)
+        self._emitir(f"{rotulo_inicio}: NADA")
         self.expressao()
+        self._emitir(f"DSVF {rotulo_fim}")
         self.consome(DO)
         self.comando()
+        self._emitir(f"DSVS {rotulo_inicio}")
+        self._emitir(f"{rotulo_fim}: NADA")
 
     def expressao(self):
         """
         <expressão> ::= <expressão simples> [<operador relacional> <expressão simples>]
+
+        Ações semânticas:
+          - Após o operador relacional e a segunda expressão simples,
+            emite a instrução de comparação correspondente
         """
         self.expressao_simples()
         # Operadores relacionais: < <= = <> > >=
         if self.lookahead.tipo in (MENOR, MENOR_IGUAL, IGUAL, DIFERENTE, MAIOR, MAIOR_IGUAL):
-            self.consome(self.lookahead.tipo)
+            operador = self.lookahead.tipo
+            self.consome(operador)
             self.expressao_simples()
+            # Mapeamento de operadores relacionais para instruções MEPA
+            mapa_relacional = {
+                MENOR:       "CMME",    # compara menor
+                MENOR_IGUAL: "CMEG",    # compara menor ou igual
+                IGUAL:       "CMIG",    # compara igual
+                DIFERENTE:   "CMDG",    # compara diferente
+                MAIOR:       "CMMA",    # compara maior
+                MAIOR_IGUAL: "CMAG",    # compara maior ou igual
+            }
+            self._emitir(mapa_relacional[operador])
 
     def expressao_simples(self):
         """
         <expressão simples> ::= [+ | -] <termo> { <operador de adição> <termo> }
+
+        Ações semânticas:
+          - Se há sinal '-' unário, emite INVR após o termo
+          - Para cada operador de adição, emite a instrução correspondente
         """
         # Sinal unário opcional
+        sinal_negativo = False
         if self.lookahead.tipo in (MAIS, MENOS):
+            if self.lookahead.tipo == MENOS:
+                sinal_negativo = True
             self.consome(self.lookahead.tipo)
         self.termo()
+        # Se havia sinal unário negativo, inverte o valor no topo da pilha
+        if sinal_negativo:
+            self._emitir("INVR")
         # Operadores de adição: + - or
         while self.lookahead.tipo in (MAIS, MENOS, OR):
-            self.consome(self.lookahead.tipo)
+            operador = self.lookahead.tipo
+            self.consome(operador)
             self.termo()
+            # Mapeamento de operadores de adição para instruções MEPA
+            if operador == MAIS:
+                self._emitir("SOMA")
+            elif operador == MENOS:
+                self._emitir("SUBT")
+            elif operador == OR:
+                self._emitir("DISJ")    # disjunção lógica
 
     def termo(self):
         """
         <termo> ::= <fator> { <operador de multiplicação> <fator> }
+
+        Ações semânticas:
+          - Para cada operador de multiplicação, emite a instrução MEPA
         """
         self.fator()
         # Operadores de multiplicação: * / div mod and
         while self.lookahead.tipo in (VEZES, BARRA, DIV, MOD, AND):
-            self.consome(self.lookahead.tipo)
+            operador = self.lookahead.tipo
+            self.consome(operador)
             self.fator()
+            # Mapeamento de operadores de multiplicação para instruções MEPA
+            if operador == VEZES:
+                self._emitir("MULT")
+            elif operador == BARRA or operador == DIV:
+                self._emitir("DIVI")
+            elif operador == MOD:
+                self._emitir("MODI")
+            elif operador == AND:
+                self._emitir("CONJ")    # conjunção lógica
 
     def fator(self):
         """
-        <fator> ::= identificador | numero | ( <expressão> ) | true | false | not <fator>
+        <fator> ::= identificador | numero | ( <expressão> )
+
+        Produção simplificada para a Fase 2 (somente expressões inteiras):
+        - Remove true, false e not da gramática original.
+
+        Ações semânticas:
+          - identificador: emite CRVL endereco (carrega valor da variável)
+          - numero: emite CRCT valor (carrega constante)
+          - ( <expressão> ): avalia a expressão entre parênteses
         """
         if self.lookahead.tipo == IDENTIF:
+            # Verifica se a variável foi declarada e obtém endereço
+            endereco = self.tabela.buscar(self.lookahead.lexema, self.lookahead.linha)
+            self._emitir(f"CRVL {endereco}")
             self.consome(IDENTIF)
         elif self.lookahead.tipo == NUM:
+            # Carrega constante numérica
+            self._emitir(f"CRCT {self.lookahead.lexema}")
             self.consome(NUM)
         elif self.lookahead.tipo == ABRE_PAR:
             self.consome(ABRE_PAR)
             self.expressao()
             self.consome(FECHA_PAR)
-        elif self.lookahead.tipo == TRUE:
-            self.consome(TRUE)
-        elif self.lookahead.tipo == FALSE:
-            self.consome(FALSE)
-        elif self.lookahead.tipo == NOT:
-            self.consome(NOT)
-            self.fator()
         else:
-            self._erro_sintatico("IDENTIF, NUM, ABRE_PAR, TRUE, FALSE ou NOT")
+            self._erro_sintatico("IDENTIF, NUM ou ABRE_PAR")
 
 
 # ============================================================
@@ -661,9 +916,12 @@ def main():
     # Inicializa o analisador léxico
     lexico = AnalisadorLexico(codigo)
 
-    # Inicializa e executa o analisador sintático
+    # Inicializa e executa o analisador sintático (com semântico e geração de código)
     sintatico = AnalisadorSintatico(lexico)
     sintatico.programa()
+
+    # Imprime o código MEPA gerado (uma instrução por linha, separadas por vírgula)
+    print(", ".join(sintatico.codigo_mepa))
 
 
 if __name__ == '__main__':
